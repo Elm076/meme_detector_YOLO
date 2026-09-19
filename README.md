@@ -26,14 +26,23 @@ Python 3.10-3.13 is recommended. From this directory:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-cuda.txt
 ```
+
+`requirements-cuda.txt` selects the CUDA 13.0 PyTorch wheels required by the
+RTX 50-series/Blackwell architecture. Use `requirements.txt` instead only for
+a CPU installation. Installing the unqualified PyTorch wheel can produce a
+`+cpu` build that sees no NVIDIA GPU even when `nvidia-smi` works.
 
 For an NVIDIA GPU, verify that PyTorch sees CUDA before starting a long run:
 
 ```powershell
 python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
+
+For this machine the expected version suffix is `+cu130`, and the command must
+print `True` followed by `NVIDIA GeForce RTX 5060 Ti`. The trainer selects GPU 0
+automatically; `--device 0` remains available as an explicit override.
 
 ## Prepare WIDER FACE
 

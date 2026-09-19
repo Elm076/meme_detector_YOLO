@@ -359,8 +359,44 @@ def _load_yolo():
     return YOLO
 
 
+def resolve_device(device: str | None) -> str:
+    """Select GPU 0 automatically and diagnose CPU-only PyTorch installations."""
+    try:
+        import torch
+    except ImportError as exc:
+        raise TrainerError("PyTorch is not installed in the active environment.") from exc
+
+    requested = (device or "").strip().lower().replace("cuda:", "")
+    if requested == "cuda":
+        requested = "0"
+
+    cuda_requested = bool(requested) and requested not in {"cpu", "mps"}
+    if cuda_requested and not torch.cuda.is_available():
+        raise TrainerError(
+            f"CUDA device {device!r} was requested, but PyTorch {torch.__version__} "
+            f"was built with CUDA {torch.version.cuda!r} and reports no CUDA devices. "
+            "For this RTX 5060 Ti environment, install the CUDA build with "
+            "`python -m pip install -r requirements-cuda.txt`."
+        )
+
+    selected = requested or ("0" if torch.cuda.is_available() else "cpu")
+    if selected == "cpu":
+        print("Using CPU because CUDA is not available to PyTorch.")
+    elif selected == "mps":
+        print("Using Apple MPS.")
+    else:
+        index_text = selected.split(",", maxsplit=1)[0]
+        try:
+            index = int(index_text)
+            gpu_name = torch.cuda.get_device_name(index)
+        except (ValueError, RuntimeError, AssertionError):
+            gpu_name = "requested CUDA device"
+        print(f"Using CUDA device {selected}: {gpu_name}")
+    return selected
+
+
 def _device_kwargs(device: str | None) -> dict[str, str]:
-    return {"device": device} if device else {}
+    return {"device": resolve_device(device)}
 
 
 def train_detector(args: argparse.Namespace) -> None:

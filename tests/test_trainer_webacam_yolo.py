@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -12,6 +13,7 @@ from trainer_webacam_yolo import (
     iter_wider_annotations,
     parse_batch,
     prepare_wider,
+    resolve_device,
 )
 
 
@@ -98,6 +100,21 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(parse_batch("0.75"), 0.75)
         with self.assertRaises(Exception):
             parse_batch("1.5")
+
+    @patch("torch.cuda.get_device_name", return_value="Test GPU")
+    @patch("torch.cuda.is_available", return_value=True)
+    def test_device_defaults_to_first_cuda_gpu(self, _available, _name):
+        self.assertEqual(resolve_device(None), "0")
+        self.assertEqual(resolve_device("cuda:0"), "0")
+
+    @patch("torch.cuda.is_available", return_value=False)
+    def test_explicit_cuda_has_actionable_error_on_cpu_build(self, _available):
+        with self.assertRaisesRegex(Exception, "requirements-cuda.txt"):
+            resolve_device("0")
+
+    @patch("torch.cuda.is_available", return_value=False)
+    def test_device_falls_back_to_cpu_when_not_requested(self, _available):
+        self.assertEqual(resolve_device(None), "cpu")
 
 
 if __name__ == "__main__":
