@@ -1,0 +1,20 @@
+.venv/
+.python/
+.tools/
+.cache/
+__pycache__/
+*.py[cod]
+
+# Downloaded data, model checkpoints, and generated training output.
+data/
+runs/
+*.pt
+*.onnx
+*.engine
+*.xml
+*.bin
+
+# Ultralytics local configuration and common experiment trackers.
+Ultralytics/
+wandb/
+mlruns/

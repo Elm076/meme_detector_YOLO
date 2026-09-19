@@ -1,0 +1,2 @@
+# YOLO26 support was added in the Ultralytics 8.4 series.
+ultralytics>=8.4.79,<9
