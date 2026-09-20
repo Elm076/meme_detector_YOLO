@@ -14,8 +14,12 @@ separate also makes live inference faster and makes it easy to add expressions.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import random
+import shutil
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 import zipfile
@@ -26,6 +30,8 @@ from typing import Iterator, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_WIDER_ROOT = PROJECT_ROOT / "data" / "wider_face"
+DEFAULT_FANE_ROOT = PROJECT_ROOT / "data" / "fane_data"
+DEFAULT_FANE_OUTPUT_ROOT = PROJECT_ROOT / "data" / "fane_balanced"
 DEFAULT_EXPRESSION_ROOT = PROJECT_ROOT / "data" / "expressions"
 DEFAULT_ASSETS_ROOT = PROJECT_ROOT / "assets"
 
@@ -348,6 +354,142 @@ def init_expression_dataset(dataset_root: Path, assets_root: Path) -> None:
     print(f"Classes: {', '.join(classes)}")
 
 
+def _is_readable_image(image_path: Path) -> bool:
+    """Return whether Pillow can decode the file, regardless of its extension."""
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise TrainerError(
+            "Pillow is required to prepare FANE data. Install requirements first."
+        ) from exc
+
+    try:
+        with Image.open(image_path) as image:
+            image.verify()
+    except (OSError, SyntaxError, ValueError):
+        return False
+    return True
+
+
+def prepare_fane_dataset(
+    source_root: Path,
+    output_root: Path,
+    images_per_label: int = 500,
+    val_fraction: float = 0.2,
+    seed: int = 42,
+    overwrite: bool = False,
+) -> Path:
+    """Create a balanced, deterministic YOLO classification dataset from FANE."""
+    source_root = source_root.resolve()
+    output_root = output_root.resolve()
+    if not source_root.is_dir():
+        raise TrainerError(f"FANE dataset directory not found: {source_root}")
+    if source_root == output_root:
+        raise TrainerError("FANE source and output directories must be different")
+    if output_root in source_root.parents:
+        raise TrainerError("FANE output directory cannot contain the source directory")
+    if images_per_label < 2:
+        raise TrainerError("images-per-label must be at least 2 (one train and one val image)")
+    if not 0.0 < val_fraction < 1.0:
+        raise TrainerError("val-fraction must be greater than 0 and less than 1")
+    if output_root.exists() and not overwrite:
+        raise TrainerError(
+            f"Output directory already exists: {output_root}. "
+            "Choose another --output or pass --overwrite."
+        )
+
+    label_images: dict[str, list[Path]] = {}
+    unreadable_images: list[Path] = []
+    for label_dir in sorted(path for path in source_root.iterdir() if path.is_dir()):
+        candidates = sorted(
+            path
+            for path in label_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+        )
+        images = []
+        for candidate in candidates:
+            if _is_readable_image(candidate):
+                images.append(candidate)
+            else:
+                unreadable_images.append(candidate)
+        if images:
+            label_images[label_dir.name] = images
+    if not label_images:
+        raise TrainerError(f"No label folders containing images found in {source_root}")
+
+    shortages = {
+        label: len(images)
+        for label, images in label_images.items()
+        if len(images) < images_per_label
+    }
+    if shortages:
+        details = ", ".join(f"{label} ({count})" for label, count in shortages.items())
+        raise TrainerError(
+            f"Not enough images for {images_per_label} per label: {details}. "
+            "Choose a smaller --images-per-label value."
+        )
+
+    if unreadable_images:
+        preview = "\n  ".join(str(path) for path in unreadable_images[:5])
+        remaining = len(unreadable_images) - min(5, len(unreadable_images))
+        suffix = f"\n  ... and {remaining} more" if remaining else ""
+        print(
+            f"Warning: skipped {len(unreadable_images)} unreadable image file(s):\n  "
+            f"{preview}{suffix}",
+            file=sys.stderr,
+        )
+
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(
+        tempfile.mkdtemp(prefix=f".{output_root.name}-", dir=output_root.parent)
+    )
+    val_count = min(images_per_label - 1, max(1, round(images_per_label * val_fraction)))
+    train_count = images_per_label - val_count
+    try:
+        for label, images in label_images.items():
+            # A label-specific seed keeps each class selection stable if labels are added later.
+            rng = random.Random(f"{seed}:{label}")
+            selected = images.copy()
+            rng.shuffle(selected)
+            selected = selected[:images_per_label]
+            splits = {
+                "val": selected[:val_count],
+                "train": selected[val_count:],
+            }
+            for split, split_images in splits.items():
+                destination = staging_root / split / label
+                destination.mkdir(parents=True, exist_ok=True)
+                for image in split_images:
+                    shutil.copy2(image, destination / image.name)
+
+        manifest = {
+            "source": str(source_root),
+            "images_per_label": images_per_label,
+            "train_images_per_label": train_count,
+            "val_images_per_label": val_count,
+            "val_fraction": val_fraction,
+            "seed": seed,
+            "labels": sorted(label_images),
+            "unreadable_images_skipped": len(unreadable_images),
+        }
+        (staging_root / "dataset.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
+
+        if output_root.exists():
+            shutil.rmtree(output_root)
+        staging_root.replace(output_root)
+    except BaseException:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        raise
+
+    print(
+        f"Prepared {len(label_images)} FANE labels with {images_per_label:,} images each "
+        f"({train_count:,} train, {val_count:,} val) at {output_root}"
+    )
+    return output_root
+
+
 def _load_yolo():
     try:
         from ultralytics import YOLO
@@ -464,24 +606,33 @@ def train_expression_classifier(args: argparse.Namespace) -> None:
     _check_expression_dataset(args.data, classes)
     YOLO = _load_yolo()
     model = YOLO(args.model)
-    result = model.train(
-        data=str(args.data.resolve()),
-        epochs=args.epochs,
-        imgsz=args.imgsz,
-        batch=args.batch,
-        workers=args.workers,
-        patience=args.patience,
-        optimizer=args.optimizer,
-        project=str(args.project.resolve()),
-        name=args.name,
-        exist_ok=args.exist_ok,
-        seed=args.seed,
-        deterministic=True,
-        pretrained=True,
-        amp=not args.no_amp,
-        plots=True,
-        **_device_kwargs(args.device),
-    )
+    try:
+        result = model.train(
+            data=str(args.data.resolve()),
+            epochs=args.epochs,
+            imgsz=args.imgsz,
+            batch=args.batch,
+            workers=args.workers,
+            patience=args.patience,
+            optimizer=args.optimizer,
+            project=str(args.project.resolve()),
+            name=args.name,
+            exist_ok=args.exist_ok,
+            seed=args.seed,
+            deterministic=True,
+            pretrained=True,
+            amp=not args.no_amp,
+            plots=True,
+            **_device_kwargs(args.device),
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        if "Couldn't open shared file mapping" in message or "error code: <1455>" in message:
+            raise TrainerError(
+                "Windows ran out of shared-memory/page-file capacity while loading batches. "
+                "Retry with --workers 0 and a bounded batch such as --batch 128."
+            ) from exc
+        raise
     print(f"Expression-classifier training complete: {result.save_dir}")
 
 
@@ -572,6 +723,31 @@ def build_parser() -> argparse.ArgumentParser:
     init_expressions.add_argument("--dataset-root", type=Path, default=DEFAULT_EXPRESSION_ROOT)
     init_expressions.add_argument("--assets", type=Path, default=DEFAULT_ASSETS_ROOT)
 
+    prepare_fane = subparsers.add_parser(
+        "prepare-fane",
+        help="Create a balanced train/val expression dataset from FANE label folders",
+    )
+    prepare_fane.add_argument("--source", type=Path, default=DEFAULT_FANE_ROOT)
+    prepare_fane.add_argument("--output", type=Path, default=DEFAULT_FANE_OUTPUT_ROOT)
+    prepare_fane.add_argument(
+        "--images-per-label",
+        type=int,
+        default=500,
+        help="total number of images to sample for every label",
+    )
+    prepare_fane.add_argument(
+        "--val-fraction",
+        type=float,
+        default=0.2,
+        help="fraction of each label reserved for validation",
+    )
+    prepare_fane.add_argument("--seed", type=int, default=42)
+    prepare_fane.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace an existing output dataset",
+    )
+
     detector = subparsers.add_parser(
         "train-detector", help="Fine-tune a pretrained YOLO26 detector on WIDER FACE"
     )
@@ -596,7 +772,10 @@ def build_parser() -> argparse.ArgumentParser:
     expression.add_argument("--assets", type=Path, default=DEFAULT_ASSETS_ROOT)
     expression.add_argument("--model", default="yolo26n-cls.pt")
     _add_shared_training_args(expression)
-    expression.set_defaults(name="yolo26n_expressions", imgsz=224)
+    # Windows DataLoader workers use page-file-backed shared mappings. AutoBatch
+    # can select an extremely large classification batch (873 on a 16 GiB GPU),
+    # which can trigger WinError 1455 even though GPU memory is still available.
+    expression.set_defaults(name="yolo26n_expressions", imgsz=224, batch=128, workers=0)
 
     validate = subparsers.add_parser("validate", help="Validate a trained checkpoint")
     validate.add_argument("weights", type=Path)
@@ -623,6 +802,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             prepare_wider(args.dataset_root, args.download, args.include_invalid)
         elif args.command == "init-expression-data":
             init_expression_dataset(args.dataset_root, args.assets)
+        elif args.command == "prepare-fane":
+            prepare_fane_dataset(
+                args.source,
+                args.output,
+                args.images_per_label,
+                args.val_fraction,
+                args.seed,
+                args.overwrite,
+            )
         elif args.command == "train-detector":
             train_detector(args)
         elif args.command == "train-expression":

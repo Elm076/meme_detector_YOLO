@@ -18,6 +18,36 @@ This is expression classification, not identity recognition. WIDER FACE is
 published under a non-commercial Creative Commons license; check the official
 dataset terms before distributing a commercial application or trained weights.
 
+## Run the live webcam overlay
+
+After both models are trained, launch the live application with:
+
+```powershell
+python webcam_yolo.py --device 0
+```
+
+It automatically uses `runs/yolo26n_widerface/weights/best.pt` for face
+detection and the newest `runs/yolo26n_expressions*/weights/best.pt` for
+expression classification. Each prediction is matched to an image in `assets/`
+by filename stem (`happy` uses `assets/happy.jpg`, for example). `neutral` has
+no overlay. Press `Q` or Escape to close the window.
+
+Pass checkpoints explicitly when needed:
+
+```powershell
+python webcam_yolo.py `
+  --detector runs\yolo26n_widerface\weights\best.pt `
+  --classifier runs\yolo26n_expressions_fixed\weights\best.pt `
+  --device 0
+```
+
+If the wrong camera opens, add `--camera 1`. Detection and expression
+thresholds can be adjusted with `--face-confidence` and
+`--expression-confidence`. Expression overlays require 70% confidence by
+default. Once an asset qualifies, it remains visible for one second after a
+missed or low-confidence prediction to reduce flicker. Change that duration
+with `--asset-hold-seconds`.
+
 ## Setup (Windows PowerShell)
 
 Python 3.10-3.13 is recommended. From this directory:
@@ -75,7 +105,34 @@ python trainer_webacam_yolo.py train-detector --resume runs\yolo26n_widerface\we
 
 ## Build and train the expression dataset
 
-Create folders based on the current meme filenames:
+To build a balanced classification dataset from `data/fane_data`, sample the
+same number of images from every label and create an 80/20 train/validation
+split:
+
+```powershell
+python trainer_webcam_yolo.py prepare-fane
+```
+
+The default is 500 total images per label (400 train and 100 validation), saved
+under `data/fane_balanced/`; the source images are never modified. Change the
+amount, split, or random selection with `--images-per-label`, `--val-fraction`,
+and `--seed`, for example:
+
+```powershell
+python trainer_webcam_yolo.py prepare-fane --images-per-label 750 --val-fraction 0.2
+python trainer_webcam_yolo.py train-expression --data data\fane_balanced --device 0 --epochs 100
+```
+
+Expression training defaults to `--batch 128 --workers 0` on Windows. This
+avoids page-file-backed DataLoader shared-memory failures that can occur when
+AutoBatch selects an extremely large classification batch. Both values remain
+configurable if you want to tune throughput.
+
+Use `--overwrite` when intentionally replacing a previously generated balanced
+dataset.
+
+For a manually collected expression dataset, create folders based on the
+current meme filenames:
 
 ```powershell
 python trainer_webacam_yolo.py init-expression-data

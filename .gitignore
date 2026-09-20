@@ -18,3 +18,7 @@ runs/
 Ultralytics/
 wandb/
 mlruns/
+
+# Does not ignore the model files needed to do inference
+!runs\yolo26n_expressions_fixed\weights\best.pt
+!runs\yolo26n_widerface\weights\best.pt

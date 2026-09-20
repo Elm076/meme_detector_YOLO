@@ -5,13 +5,14 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from trainer_webacam_yolo import (
+from trainer_webcam_yolo import (
     WiderBox,
     _to_yolo_box,
     build_parser,
     discover_meme_classes,
     iter_wider_annotations,
     parse_batch,
+    prepare_fane_dataset,
     prepare_wider,
     resolve_device,
 )
@@ -84,6 +85,58 @@ class MemeClassTests(unittest.TestCase):
             self.assertEqual(discover_meme_classes(assets), ["shocked", "smiling"])
 
 
+class FaneDatasetTests(unittest.TestCase):
+    def test_balances_labels_and_builds_train_val_layout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "fane"
+            output = root / "balanced"
+            for label in ("angry", "happy"):
+                label_dir = source / label
+                label_dir.mkdir(parents=True)
+                for index in range(8):
+                    Image.new("RGB", (8, 8), color=(index, 0, 0)).save(
+                        label_dir / f"{label}{index}.jpg"
+                    )
+
+            prepare_fane_dataset(source, output, images_per_label=5, val_fraction=0.4, seed=7)
+
+            for label in ("angry", "happy"):
+                self.assertEqual(len(list((output / "train" / label).glob("*.jpg"))), 3)
+                self.assertEqual(len(list((output / "val" / label).glob("*.jpg"))), 2)
+                self.assertEqual(len(list((source / label).glob("*.jpg"))), 8)
+            self.assertTrue((output / "dataset.json").is_file())
+
+    def test_skips_files_that_have_an_image_extension_but_are_not_images(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            label_dir = root / "fane" / "happy"
+            label_dir.mkdir(parents=True)
+            for index in range(3):
+                Image.new("RGB", (8, 8)).save(label_dir / f"valid{index}.jpg")
+            (label_dir / "not_really_an_image.jpg").write_text(
+                '{"cells": []}', encoding="utf-8"
+            )
+
+            output = prepare_fane_dataset(
+                root / "fane", root / "balanced", images_per_label=2
+            )
+
+            selected = list((output / "train" / "happy").glob("*.jpg"))
+            selected += list((output / "val" / "happy").glob("*.jpg"))
+            self.assertEqual(len(selected), 2)
+            self.assertNotIn("not_really_an_image.jpg", {path.name for path in selected})
+
+    def test_rejects_labels_with_too_few_images(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            label_dir = root / "fane" / "angry"
+            label_dir.mkdir(parents=True)
+            Image.new("RGB", (8, 8)).save(label_dir / "one.jpg")
+            with self.assertRaisesRegex(Exception, "Not enough images"):
+                prepare_fane_dataset(root / "fane", root / "balanced", images_per_label=2)
+
+
 class CommandLineTests(unittest.TestCase):
     def test_real_time_defaults_use_yolo26_nano(self):
         detector = build_parser().parse_args(["train-detector"])
@@ -92,6 +145,13 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(detector.name, "yolo26n_widerface")
         self.assertEqual(classifier.model, "yolo26n-cls.pt")
         self.assertEqual(classifier.imgsz, 224)
+        self.assertEqual(classifier.batch, 128)
+        self.assertEqual(classifier.workers, 0)
+
+    def test_fane_defaults_to_500_images_per_label(self):
+        fane = build_parser().parse_args(["prepare-fane"])
+        self.assertEqual(fane.images_per_label, 500)
+        self.assertEqual(fane.val_fraction, 0.2)
 
     def test_batch_parser_preserves_integer_and_fraction_forms(self):
         self.assertEqual(parse_batch("16"), 16)

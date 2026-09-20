@@ -1,3 +1,4 @@
 # CPU/default installation. NVIDIA users should install requirements-cuda.txt.
 # YOLO26 support was added in the Ultralytics 8.4 series.
 ultralytics>=8.4.79,<9
+opencv-python>=4.8
