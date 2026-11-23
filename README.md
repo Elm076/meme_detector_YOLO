@@ -1,4 +1,4 @@
-# YOLO26 webcam meme trainer
+# YOLO26 webcam meme App
 
 This project trains the two models needed by a real-time webcam meme overlay:
 
